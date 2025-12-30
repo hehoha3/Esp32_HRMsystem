@@ -1,3 +1,4 @@
+#include <Preferences.h>
 #include "http_client.h"
 #include "lcd_hmi.h"
 #include "rfid_rc522.h"
@@ -16,47 +17,77 @@ const uint32_t LCD_RESPONSE_TIMEOUT_MS = 800;
 const uint32_t SEND_DEBAUNCE_MS = 1500;
 const uint32_t RFID_IDLE_TIMEOUT_MS = 5000;
 
-const char *WIFI_SSID = "BA LEN BON";
-const char *WIFI_PASSWORD = "0comatkhau";
-const char *SERVER = "http://192.168.50.93:1880";
-
-LCD_HMI lcd(LCD_RX_PIN, LCD_TX_PIN, LCD_BAUD_RATE);
-RFID_RC522 rfid(RFID_SS_PIN, RFID_RST_PIN);
-HTTP_CLIENT httpClient(WIFI_SSID, WIFI_PASSWORD, SERVER);
+// Variables
+String WIFI_SSID = "";
+String WIFI_PASSWORD = "";
+String SERVER = "";
+uint8_t RFID_KEY[MFRC522::MF_KEY_SIZE];
+const char NAMESPACE[7] = "config";
 
 uint32_t lastRfScan = 0;
 uint32_t lastLcdPoll = 0;
 uint32_t lastRfidDetectedTime = 0;
 uint32_t lastSentTime = 0;
 String lastSentTag = "";
-bool lcdReseted = false;
+bool lcdReseted = true;
 
+String scannedSSIDs[6];
+uint8_t selectedBtnIndex = 0;
+
+// objects
+Preferences prefs;
+LCD_HMI lcd(LCD_RX_PIN, LCD_TX_PIN, LCD_BAUD_RATE);
+RFID_RC522 rfid(RFID_SS_PIN, RFID_RST_PIN);
+HTTP_CLIENT httpClient(WIFI_SSID, WIFI_PASSWORD, SERVER);
+
+// declare functions
 String bytesToHexString(const uint8_t *data, size_t len);
-String hexToId(const String &hexStr);
+String hexStringToId(const String &hexStr);
 void pollLcdForUnsolicitedResponses();
-String waitForLcdResponse(uint32_t timeoutMs);
+bool connectWifi();
 
+//! SETUP func
 void setup()
 {
     Serial.begin(115200);
+
+    // load configs from NVS
+    prefs.begin(NAMESPACE, true);
+    WIFI_SSID = prefs.getString("WIFI_SSID", "");
+    WIFI_PASSWORD = prefs.getString("WIFI_PASS", "");
+    SERVER = prefs.getString("SERVER_IP", "");
+    prefs.getBytes("RFID_KEYA", RFID_KEY, sizeof(RFID_KEY));
+    prefs.end();
+
+    // Serial.println("[ESP] Loaded configs ============");
+    // Serial.println("[ESP] WIFI SSID: " + WIFI_SSID);
+    // Serial.println("[ESP] WIFI PASSWORD: " + WIFI_PASSWORD);
+    // Serial.println("[ESP] SERVER URL: " + SERVER);
+
+    // set ssid, password & server url for an object client
+    httpClient.setCredentials(WIFI_SSID, WIFI_PASSWORD);
+    httpClient.setServerIP(SERVER);
+
+    // set RFID Key A for reader
+    rfid.setRFIDKey(RFID_KEY);
+
+    // reset a scanned SSID list
+    for (int i = 0; i < 6; i++)
+    {
+        scannedSSIDs[i] = "";
+    }
 
     // initialize peripherals
     lcd.begin();
     rfid.begin();
     delay(500);
     
-    if (httpClient.begin())
-    {
-        lcd.sendTextToElement("page 0");
-    }
-    else
-    {
-        lcd.sendTextToElement("page connErr");
-    }
+    connectWifi();
 
-    Serial.println("System Initialized");
+    Serial.println("[ESP] System Initialized");
 }
 
+//! LOOP func
 void loop()
 {
     uint32_t now = millis();
@@ -92,7 +123,7 @@ void loop()
             // format block data as hex
             String endpoint = "/staff-id?id=";
             String hexString = bytesToHexString(blockData, sizeof(blockData));
-            String asciiString = hexToId(hexString);
+            String asciiString = hexStringToId(hexString);
             endpoint += asciiString;
 
             // debug print
@@ -113,18 +144,6 @@ void loop()
                 Serial.print("[LCD] Sent: ");
                 Serial.println(httpResp);
                 lcd.sendTextToElement("t3.txt=\"OK\"");
-
-                // wait for reply (short timeout)
-                String lcdResp = waitForLcdResponse(LCD_RESPONSE_TIMEOUT_MS);
-                if (lcdResp.length() > 0)
-                {
-                    Serial.print("[LCD reply after send] ");
-                    Serial.println(lcdResp);
-                }
-                else
-                {
-                    Serial.println("[LCD reply after send] (no response, timeout)");
-                }
 
                 // update last sent info
                 lastSentTag = hexString;
@@ -162,7 +181,7 @@ String bytesToHexString(const uint8_t *data, size_t len)
     return hexStr;
 }
 
-String hexToId(const String &hexStr)
+String hexStringToId(const String &hexStr)
 {
     String result = "";
     result.reserve(hexStr.length() / 2);
@@ -193,6 +212,7 @@ String hexToId(const String &hexStr)
     return result;
 }
 
+// read unsolicited responses from LCD when no request is sent
 void pollLcdForUnsolicitedResponses()
 {
     String response = lcd.readResponse();
@@ -200,22 +220,77 @@ void pollLcdForUnsolicitedResponses()
     {
         Serial.print("[LCD unsolicited] ");
         Serial.println(response);
+        if (response.startsWith("reConnect"))
+        {
+            if (httpClient.reconnecWifi())
+            {
+                lcd.sendTextToElement("page 0");
+            }
+            else
+            {
+                lcd.sendTextToElement("page connErr");
+            }
+        }
+        else if (response.startsWith("scan"))
+        {
+            Serial.println("SCANNING WIFI");
+            lcd.sendTextToElement("t0.txt=\"Wifi Scanning...\"");
+
+            uint8_t n = httpClient.scanWifi(scannedSSIDs);
+
+            if (n > 0)
+            {
+                lcd.sendTextToElement("t0.txt=\"Scan Success\"");
+
+                for (uint8_t i = 0; i < n; i++)
+                {
+                    lcd.sendTextToElement("b" + String(i + 1) + ".txt=\"" + String(scannedSSIDs[i]) + "\"");
+                    lcd.sendTextToElement("vis b" + String(i + 1) + ",1");
+                }
+            }
+            else
+            {
+                lcd.sendTextToElement("t0.txt=\"Scan Failed !\"");
+            }
+        }
+        else if (response.startsWith("wifi_"))
+        {
+            int idx = response.substring(4).toInt();
+            selectedBtnIndex = idx;
+            String WIFI_SSID = scannedSSIDs[idx - 1];
+            Serial.println("Wifi selected: " + WIFI_SSID);
+        }
+        else if (response.startsWith("pw:"))
+        {
+            WIFI_PASSWORD = response.substring(3);
+
+            // set ssid & password for an object client
+            httpClient.setCredentials(WIFI_SSID, WIFI_PASSWORD);
+
+            // if connect success then save ssid & password to NVS
+            if (connectWifi()) {
+                prefs.begin(NAMESPACE, false);
+                prefs.putString("WIFI_SSID", WIFI_SSID);
+                prefs.putString("WIFI_PASS", WIFI_PASSWORD);
+                prefs.end();
+            }
+        }
     }
 }
 
-String waitForLcdResponse(uint32_t timeoutMs)
+bool connectWifi()
 {
-    uint32_t startTime = millis();
-    String response = "";
+    // show loading screen on LCD
+    lcd.sendTextToElement("page loading");
 
-    while (millis() - startTime < timeoutMs)
+    if (httpClient.begin())
     {
-        response += lcd.readResponse();
-        if (response.length() > 0)
-        {
-            break;
-        }
-        delay(10); // small delay to avoid busy-waiting
+        lcd.sendTextToElement("page 0");
+        return true;
     }
-    return response;
+    else
+    {
+        lcd.sendTextToElement("page connErr");
+        return false;
+    }
 }
