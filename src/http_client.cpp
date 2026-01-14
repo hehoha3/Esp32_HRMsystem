@@ -4,7 +4,7 @@
 HTTP_CLIENT::HTTP_CLIENT(String ssid, String password, String serverUrl)
     : _ssid(ssid), _password(password), _serverUrl(serverUrl) {}
 
-    // destructor
+// destructor
 HTTP_CLIENT::~HTTP_CLIENT()
 {
     _httpClient.end();
@@ -95,22 +95,62 @@ bool HTTP_CLIENT::reconnecWifi()
 }
 
 // scan available Wifi networks around Esp
-uint8_t HTTP_CLIENT::scanWifi(String scannedList[])
+uint8_t HTTP_CLIENT::scanWifi(String scannedList[], size_t numberItem)
 {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(true); // disconnect and erase previous connection
+    delay(100);
+
     // reset a scanned SSID list
-    for (int i = 0; i < 6; i++)
+    for (size_t i = 0; i < numberItem; ++i)
     {
         scannedList[i] = "";
     }
 
     int n = WiFi.scanNetworks();
-    Serial.println("[HTTP] Wifi scan completed.");
+    Serial.printf("[HTTP] Wifi scan completed, n=%d\n", n);
 
-    for (int i = 0; i < min(n, 6); i++)
+    // scan failed
+    if (n <= 0)
     {
-        scannedList[i] = WiFi.SSID(i);
+        Serial.println("[HTTP] Wifi scan failed or no networks");
+        return 0;
     }
-    return (uint8_t)min(n, 6); // just take first 6 SSIDs
+
+    // number of added wifi
+    size_t added = 0;
+    for (int i = 0; i < n && added < numberItem; ++i)
+    {
+        String ssid = WiFi.SSID(i);
+
+        // Check if this SSID already added
+        bool exists = false;
+        for (size_t j = 0; j < added; ++j)
+        {
+            if (scannedList[j] == ssid)
+            {
+                exists = true;
+                break;
+            }
+        }
+
+        if (!exists)
+        {
+            // Add unique SSID to output list
+            scannedList[added++] = ssid;
+            // Serial.printf("[HTTP] Added: %s (BSSID=%s, RSSI=%d, CH=%d)\n",
+            //               ssid.c_str(), WiFi.BSSIDstr(i).c_str(), WiFi.RSSI(i), WiFi.channel(i));
+        }
+        // else
+        // {
+        //     Serial.printf("[HTTP] Duplicate SSID skipped: %s (BSSID=%s, RSSI=%d, CH=%d)\n",
+        //                   ssid.c_str(), WiFi.BSSIDstr(i).c_str(), WiFi.RSSI(i), WiFi.channel(i));
+        // }
+    }
+
+    WiFi.scanDelete(); // free driver memory
+    Serial.printf("[HTTP] Unique SSIDs found: %u\n", (unsigned)added);
+    return (uint8_t)added;
 }
 
 // set ssid & password

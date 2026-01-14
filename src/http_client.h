@@ -12,7 +12,7 @@ public:
     ~HTTP_CLIENT();
     bool begin();
     bool reconnecWifi();
-    uint8_t scanWifi(String scannedList[]);
+    uint8_t scanWifi(String scannedList[], size_t numberItem);
     void setCredentials(String ssid, String password);
     void setServerIP(String serverURL);
     String httpGetRequest(const String &endpoint);

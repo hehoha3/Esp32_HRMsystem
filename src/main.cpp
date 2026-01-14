@@ -10,12 +10,16 @@
 #define RFID_SS_PIN 5
 #define RFID_RST_PIN 22
 
+#define WARN_DEVICEs_PIN 4
+#define DOOR_PIN 12
+#define CHECK_PIN 27
+
 // Timing configuration (tune as needed)
 const uint32_t RFID_SCAN_INTERVAL_MS = 200;
 const uint32_t LCD_POLL_INTERVAL_MS = 50;
-const uint32_t LCD_RESPONSE_TIMEOUT_MS = 800;
 const uint32_t SEND_DEBAUNCE_MS = 1500;
-const uint32_t RFID_IDLE_TIMEOUT_MS = 5000;
+const uint32_t RESET_DEVICES_TIMEOUT_MS = 5000;
+const uint32_t RESET_WARN_TIMEOUT_MS = 369;
 
 // Variables
 String WIFI_SSID = "";
@@ -31,8 +35,16 @@ uint32_t lastSentTime = 0;
 String lastSentTag = "";
 bool lcdReseted = true;
 
-String scannedSSIDs[6];
+const size_t scannedSSID_size = 5;
+String scannedSSIDs[scannedSSID_size];
 uint8_t selectedBtnIndex = 0;
+
+uint32_t lastWarnIsON = 0;
+uint32_t lastCheckIsON = 0;
+
+bool warnState = false;
+bool doorState = false;
+bool checkState = false;
 
 // objects
 Preferences prefs;
@@ -72,7 +84,7 @@ void setup()
     rfid.setRFIDKey(RFID_KEY);
 
     // reset a scanned SSID list
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < scannedSSID_size; i++)
     {
         scannedSSIDs[i] = "";
     }
@@ -83,6 +95,16 @@ void setup()
     delay(500);
     
     connectWifi();
+    
+    // Setup for device pin
+    pinMode(WARN_DEVICEs_PIN, OUTPUT);
+    digitalWrite(WARN_DEVICEs_PIN, LOW);
+
+    pinMode(DOOR_PIN, OUTPUT);
+    digitalWrite(DOOR_PIN, LOW);
+
+    pinMode(CHECK_PIN, OUTPUT);
+    digitalWrite(CHECK_PIN, LOW);
 
     Serial.println("[ESP] System Initialized");
 }
@@ -99,13 +121,29 @@ void loop()
         pollLcdForUnsolicitedResponses();
     }
 
-    if (!lcdReseted && now - lastRfidDetectedTime >= RFID_IDLE_TIMEOUT_MS)
+    if (!lcdReseted && doorState && now - lastRfidDetectedTime >= RESET_DEVICES_TIMEOUT_MS)
     {
         lcd.sendTextToElement("t2.txt=\"\"");
         lcd.sendTextToElement("t3.txt=\"\"");
         Serial.println("[RFID] No tag for 10s -> LCD cleared");
 
+        // turn of the Notification LED
+        digitalWrite(DOOR_PIN, LOW);
+        
         lcdReseted = true;
+        doorState = false;
+    }
+
+    // reset the check device
+    if (checkState && now - lastCheckIsON >= RESET_DEVICES_TIMEOUT_MS) {
+        checkState = false;
+        digitalWrite(CHECK_PIN, LOW);
+    }
+
+    if (warnState && now - lastWarnIsON >= RESET_WARN_TIMEOUT_MS)
+    {
+        warnState = false;
+        digitalWrite(WARN_DEVICEs_PIN, LOW);
     }
 
     // 2) Periodic RFID scan
@@ -114,9 +152,9 @@ void loop()
         lastRfScan = now;
 
         uint8_t blockData[16];
-        bool ok = rfid.readBlockData(4, blockData, sizeof(blockData));
+        uint8_t ret = rfid.readBlockData(4, blockData, sizeof(blockData));
 
-        if (ok)
+        if (ret == 0)
         {
             lastRfidDetectedTime = now;
 
@@ -139,22 +177,58 @@ void loop()
                 // send to server
                 String httpResp = httpClient.httpGetRequest(endpoint);
                 Serial.println("[HTTP] Server resp: " + httpResp);
+
+                // parse the HTTP Response
+                JsonDocument doc;
+
+                DeserializationError err = deserializeJson(doc, httpResp);
+
+                if (err)
+                {
+                    Serial.print("Json parse is failed: ");
+                    Serial.println(err.c_str());
+                    return;
+                }
+
+                String name = doc["name"];
+                bool check = doc["check"];
+
                 // send to LCD
-                lcd.sendTextToElement("t2.txt=\"" + httpResp + "\"");
+                lcd.sendTextToElement("t2.txt=\"" + name + "\"");
                 Serial.print("[LCD] Sent: ");
                 Serial.println(httpResp);
                 lcd.sendTextToElement("t3.txt=\"OK\"");
+
+                // open the door
+                digitalWrite(DOOR_PIN, HIGH);
+
+                if (check)
+                {
+                    lastCheckIsON = now;
+                    checkState = true;
+                    digitalWrite(CHECK_PIN, HIGH);
+                }
+
+                // String checkStatus = check ? "OK" : "NOT";
+                // lcd.sendTextToElement("t3.txt=\"" + checkStatus + "\"");
 
                 // update last sent info
                 lastSentTag = hexString;
                 lastSentTime = millis();
                 lcdReseted = false;
+                doorState = true;
             }
             else
             {
                 // skip sending duplicate tag within debounce window
                 Serial.println("[RFID] Duplicate tag - send suppressed (debounce)");
             }
+        }
+        else if (ret == 2)
+        {
+            lastWarnIsON = now;
+            warnState = true;
+            digitalWrite(WARN_DEVICEs_PIN, HIGH);
         }
         else
         {
@@ -236,7 +310,7 @@ void pollLcdForUnsolicitedResponses()
             Serial.println("SCANNING WIFI");
             lcd.sendTextToElement("t0.txt=\"Wifi Scanning...\"");
 
-            uint8_t n = httpClient.scanWifi(scannedSSIDs);
+            uint8_t n = httpClient.scanWifi(scannedSSIDs, scannedSSID_size);
 
             if (n > 0)
             {
@@ -257,8 +331,11 @@ void pollLcdForUnsolicitedResponses()
         {
             int idx = response.substring(4).toInt();
             selectedBtnIndex = idx;
-            String WIFI_SSID = scannedSSIDs[idx - 1];
+            WIFI_SSID = scannedSSIDs[idx];
             Serial.println("Wifi selected: " + WIFI_SSID);
+
+            // show keyboard screen
+            lcd.sendTextToElement("page keybdA");
         }
         else if (response.startsWith("pw:"))
         {
@@ -268,7 +345,8 @@ void pollLcdForUnsolicitedResponses()
             httpClient.setCredentials(WIFI_SSID, WIFI_PASSWORD);
 
             // if connect success then save ssid & password to NVS
-            if (connectWifi()) {
+            if (connectWifi())
+            {
                 prefs.begin(NAMESPACE, false);
                 prefs.putString("WIFI_SSID", WIFI_SSID);
                 prefs.putString("WIFI_PASS", WIFI_PASSWORD);
