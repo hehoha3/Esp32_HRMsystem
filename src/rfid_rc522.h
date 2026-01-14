@@ -9,7 +9,7 @@ class RFID_RC522
 public:
     RFID_RC522(uint8_t ss_pin, uint8_t rst_pin);
     void begin();
-    bool readBlockData(uint8_t block_num, uint8_t *data, uint8_t data_length);
+    uint8_t readBlockData(uint8_t block_num, uint8_t *data, uint8_t data_length);
     bool compareUid(const uint8_t *expected_UID, uint8_t expected_length);
     void setRFIDKey(const uint8_t *keyBytes);
 

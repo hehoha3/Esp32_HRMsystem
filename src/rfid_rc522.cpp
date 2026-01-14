@@ -17,14 +17,20 @@ void RFID_RC522::begin()
     Serial.print("[RC522] Reader is ready to read RFID Tag");
 }
 
-// Read block data function
-bool RFID_RC522::readBlockData(uint8_t block_num, uint8_t *data, uint8_t data_length)
+/**
+ * @brief Read block data function
+ *
+ * @return 2 -> failed to authentication / failed to read data
+ * @return 1 -> there're no card present
+ * @return 0 -> Successfully
+ */
+uint8_t RFID_RC522::readBlockData(uint8_t block_num, uint8_t *data, uint8_t data_length)
 {
     if (!isCardPresent())
-        return false;
+        return 1;
 
     if (!blockAuth(block_num))
-        return false;
+        return 2;
 
     uint8_t buffer[18];
     uint8_t bufferSize = sizeof(buffer);
@@ -36,7 +42,7 @@ bool RFID_RC522::readBlockData(uint8_t block_num, uint8_t *data, uint8_t data_le
         Serial.print(block_num);
         Serial.print(": ");
         Serial.println(_mfrc522.GetStatusCodeName(status));
-        return false;
+        return 2;
     }
 
     data_length = (data_length < bufferSize) ? data_length : bufferSize;
@@ -46,10 +52,12 @@ bool RFID_RC522::readBlockData(uint8_t block_num, uint8_t *data, uint8_t data_le
     _mfrc522.PICC_HaltA();
     _mfrc522.PCD_StopCrypto1();
 
-    return true;
+    return 0;
 }
 
-// compare this UID to expected UID
+/**
+ * @brief compare this UID to expected UID
+ */
 bool RFID_RC522::compareUid(const uint8_t *expected_UID, uint8_t expected_length)
 {
     if (_mfrc522.uid.size != expected_length)
@@ -108,10 +116,10 @@ void RFID_RC522::setRFIDKey(const uint8_t *keyBytes)
         _key.keyByte[i] = keyBytes[i];
     }
 
-    Serial.print("[RC522] RFID Key A: ");
-    for (uint8_t i = 0; i < MFRC522::MF_KEY_SIZE; i++) {
-        Serial.print(_key.keyByte[i] < 0x10 ? " 0" : " ");
-        Serial.print(_key.keyByte[i], HEX);
-    }
-    Serial.println();
+    // Serial.print("[RC522] RFID Key A: ");
+    // for (uint8_t i = 0; i < MFRC522::MF_KEY_SIZE; i++) {
+    //     Serial.print(_key.keyByte[i] < 0x10 ? " 0" : " ");
+    //     Serial.print(_key.keyByte[i], HEX);
+    // }
+    // Serial.println();
 }
